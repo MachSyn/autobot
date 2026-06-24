@@ -7,31 +7,14 @@ import express      from 'express';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { createHash, randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT      = parseInt(process.env.PORT || '3149', 10);
 const VERSION   = '1.0.0';
-const SALT      = process.env.KEY_SALT || 'autobot-machsyn';
 
 const CAR_BRAIN  = readFileSync(join(__dirname, 'car_brain.md'), 'utf8');
 const AGENT_SPEC = readFileSync(join(__dirname, 'marek_agent_spec.md'), 'utf8');
-
-// ─── Auth ─────────────────────────────────────────────────────────────────────
-
-function hashKey(raw) {
-  let h = Buffer.from(raw + SALT);
-  for (let i = 0; i < 10000; i++) h = createHash('sha256').update(h).digest();
-  return h.toString('base64');
-}
-
-function isAuthed(req) {
-  const raw = req.headers['x-pi-access-key'] ?? '';
-  if (!raw) return false;
-  const row = db.prepare('SELECT id FROM access_keys WHERE key_hash = ?').get(hashKey(raw));
-  return !!row;
-}
 
 // ─── DB ───────────────────────────────────────────────────────────────────────
 
@@ -81,12 +64,6 @@ function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_listings ON listings(make, model);
 
-    CREATE TABLE IF NOT EXISTS access_keys (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      key_hash   TEXT NOT NULL UNIQUE,
-      nick       TEXT,
-      created_at TEXT NOT NULL
-    );
   `);
 }
 
@@ -489,8 +466,6 @@ async function handleRpc(req, body) {
 
   if (method?.startsWith('notifications/')) return { jsonrpc: '2.0' };
 
-  if (!isAuthed(req)) return err(id, -32001, 'Unauthorized. Provide X-Pi-Access-Key header.');
-
   if (method === 'tools/list') return ok(id, { tools: TOOLS });
 
   if (method === 'tools/call') {
@@ -537,19 +512,6 @@ app.get('/3.14/sse', (req, res) => {
 app.post('/3.14/messages', async (req, res) => {
   if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   return res.json(await handleRpc(req, req.body));
-});
-
-// Admin key provisioning — requires X-Admin-Key header
-app.post('/access-key', (req, res) => {
-  const adminHash = process.env.ADMIN_KEY_HASH;
-  if (!adminHash) return res.status(500).json({ error: 'ADMIN_KEY_HASH not set' });
-  const adminRaw = req.headers['x-admin-key'] ?? '';
-  if (!adminRaw || hashKey(adminRaw) !== adminHash) return res.status(401).json({ error: 'Unauthorized' });
-  const raw  = randomUUID();
-  const hash = hashKey(raw);
-  const nick = req.body?.nick || null;
-  db.prepare('INSERT INTO access_keys (key_hash, nick, created_at) VALUES (?,?,?)').run(hash, nick, new Date().toISOString());
-  res.json({ key: raw, nick });
 });
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', version: VERSION }));
