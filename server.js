@@ -509,6 +509,11 @@ app.get('/3.14/sse', (req, res) => {
   req.on('close', () => clearInterval(ping));
 });
 
+app.post('/3.14', async (req, res) => {
+  if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+  return res.json(await handleRpc(req, req.body));
+});
+
 app.post('/3.14/messages', async (req, res) => {
   if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   return res.json(await handleRpc(req, req.body));
