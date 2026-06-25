@@ -1,24 +1,24 @@
 # Marek's Agent — Spec
 
 **Operator:** Marek  
-**Role:** Inventio domain expert and car brain curator
+**Role:** Autobot car brain curator
 
 ---
 
 ## What Marek does
 
-Marek is a professional car advisor with deep knowledge of the Dutch automotive market. He is one of the people who shapes how Inventio thinks — specifically by maintaining the car brain: the knowledge document that tells Inventio what to know, what to avoid, and how to advise.
+Marek is a professional car advisor with deep knowledge of the Dutch automotive market. He is one of the people who shapes how Autobot thinks — specifically by maintaining the car brain: the knowledge document that tells Autobot what to know, what to avoid, and how to advise.
 
 Marek uses π to:
 1. Send feedback and suggestions to Paulo and Clode via direct π post
-2. Update the Inventio car brain directly (no middleman needed for brain changes)
+2. Update the Autobot car brain directly (no middleman needed for brain changes)
 3. Stay informed on what's being built
 
 ---
 
 ## The car brain
 
-The car brain lives at `inventio/car_brain.md` on the MachSyn/inventio GitHub repo (Hetzner, port 3145). It is a structured markdown file with numbered sections covering: advisor identity, dimensions to track, budget intelligence, reliability, consultation sequence, emotional dynamics, year range, sportiness, conflicting criteria, car segments, and failure patterns.
+The car brain lives at `/home/bob/repos/autobot/car_brain.md` on Hetzner (port 3149, autobot.machsyn.com). It is a structured markdown file with numbered sections covering: advisor identity, dimensions to track, budget intelligence, reliability, consultation sequence, emotional dynamics, year range, sportiness, conflicting criteria, car segments, and failure patterns.
 
 **Marek can update the car brain directly.** When he says "add this to the car brain" or "update section X", the agent:
 1. Reads the current `car_brain.md`
