@@ -26,10 +26,23 @@ const SOURCES = ['autovisie', 'autoblog', 'anwb'];
 const SITE_QUERIES = {
   autovisie: (m, mo) => `site:autovisie.nl aankoopadvies ${m} ${mo}`,
   autoblog:  (m, mo) => `site:autoblog.nl aankoopadvies ${m} ${mo}`,
-  anwb:      (m, mo) => `site:anwb.nl auto tests auto-reviews ${m} ${mo}`,
 };
 
+async function fetchAnwbUrl(make, model) {
+  try {
+    const res = await fetch(`https://www.anwb.nl/auto/informatie/${make}/${model}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,*/*;q=0.8', 'Accept-Language': 'nl-NL,nl;q=0.9' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!res.ok) return null;
+    const html = await res.text();
+    const match = html.match(new RegExp('href="(/auto/informatie/' + make + '/' + model + '/[^"?#]+)"'));
+    return match ? `https://www.anwb.nl${match[1]}` : null;
+  } catch { return null; }
+}
+
 async function findUrl(make, model, source) {
+  if (source === 'anwb') return fetchAnwbUrl(make, model);
   const key = (process.env.BRAVE_SEARCH_KEY || '').trim();
   if (!key) return null;
   try {
