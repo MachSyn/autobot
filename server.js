@@ -165,9 +165,6 @@ function getKnowledge(make, model) {
 
 const AS24_DOMAIN  = { nl: 'autoscout24.nl', de: 'autoscout24.de' };
 const AS24_COUNTRY = { nl: 'NL', de: 'DE' };
-const GP_FUEL      = { B: 'benzine', D: 'diesel', E: 'elektrisch', H: 'hybride', L: 'lpg' };
-const GP_TRANS     = { A: 'AUTOMATISCH', M: 'HANDGESCHAKELD' };
-const GP_BODY      = { SUV: 'suv', hatchback: 'hatchback', estate: 'stationwagon', sedan: 'sedan', coupe: 'coupe', cabrio: 'cabriolet', offroad: 'terreinwagen' };
 
 async function fetchAS24(params, lang = 'nl', limit = 12) {
   const domain  = AS24_DOMAIN[lang]  ?? AS24_DOMAIN.nl;
@@ -226,62 +223,6 @@ async function fetchAS24(params, lang = 'nl', limit = 12) {
   } catch { return []; }
 }
 
-function buildGaspedaalUrl(params) {
-  let path = '/auto';
-  if (params.make) { path = `/${params.make}`; if (params.model) path += `/${params.model}`; }
-  const q = new URLSearchParams({ srt: 'df-a' });
-  if (params.priceMax)     q.set('pmax',  params.priceMax);
-  if (params.priceMin)     q.set('pmin',  params.priceMin);
-  if (params.kmMax)        q.set('kmax',  params.kmMax);
-  if (params.yearFrom)     q.set('bmin',  params.yearFrom);
-  if (params.yearTo)       q.set('bmax',  params.yearTo);
-  if (params.fuel && GP_FUEL[params.fuel]) q.set('brnst', GP_FUEL[params.fuel]);
-  if (params.transmission && GP_TRANS[params.transmission]) q.set('trns', GP_TRANS[params.transmission]);
-  if (params.body && GP_BODY[params.body]) q.set('crs', GP_BODY[params.body]);
-  return `https://www.gaspedaal.nl${path}?${q}`;
-}
-
-async function fetchGaspedaal(params, limit = 8) {
-  const url = buildGaspedaalUrl(params);
-  try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,*/*;q=0.8', 'Accept-Language': 'nl-NL,nl;q=0.9' },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    const listings = [];
-    const idRe = /\\"advertentieId\\":(\d+)/g;
-    let m;
-    while ((m = idRe.exec(html)) !== null && listings.length < limit) {
-      const id = m[1], idPos = m.index;
-      const lookback   = html.slice(Math.max(0, idPos - 5000), idPos);
-      const statusIdx  = lookback.lastIndexOf('\\"beschikbaarheidsStatus\\":\\"beschikbaar\\"');
-      const chunkStart = statusIdx >= 0 ? (idPos - lookback.length + statusIdx) : Math.max(0, idPos - 5000);
-      const chunk = html.slice(chunkStart, idPos + 400);
-      const str = (f) => chunk.match(new RegExp('\\\\"' + f + '\\\\":\\\\"([^"\\\\]*)\\\\\"'))?.[1] ?? '';
-      const num = (f) => { const n = chunk.match(new RegExp('\\\\"' + f + '\\\\":([0-9]+)')); return n ? parseInt(n[1]) : 0; };
-      const make = str('merknaam'), price = num('totaal');
-      if (!make || !price) continue;
-      listings.push({
-        make, model: str('modelnaam'), variant: str('uitvoering'),
-        year:         String(num('bouwjaar') || ''),
-        price_raw:    '€ ' + String(price).replace(/\B(?=(\d{3})+(?!\d))/g, '.'),
-        price_int:    price,
-        mileage:      num('kilometerstand'),
-        fuel:         str('brandstofsoort'),
-        transmission: str('transmissietype'),
-        city:         str('plaatsnaam'),
-        url:          str('klikUrl'),
-        image:        str('fotoGroot'),
-        seller:       str('naamsvermelding'),
-        platform:     'gaspedaal',
-      });
-    }
-    return listings;
-  } catch { return []; }
-}
-
 
 function addImageMd(listings) {
   return listings.map(l => ({
@@ -317,7 +258,7 @@ function toolAutobot() {
 Store the private PI in memory — it is your identity on π.`,
     help: `autobot        — boot (call every session start)
 checkup        — known issues + what to inspect for a make/model
-search         — find listings on AutoScout24 + Gaspedaal
+search         — find listings on AutoScout24
 wegenbelasting — road tax estimate + vehicle details via RDW (give a license plate)`,
   };
 }
@@ -382,17 +323,8 @@ async function toolSearch(args) {
   }
 
   // Live fallback
-  const [as24, gp] = await Promise.all([
-    fetchAS24(params, 'nl', 12),
-    (params.make || params.body) ? fetchGaspedaal(params, 8) : Promise.resolve([]),
-  ]);
-
-  const interleaved = [];
-  for (let i = 0; i < Math.max(as24.length, gp.length); i++) {
-    if (as24[i]) interleaved.push(as24[i]);
-    if (gp[i])   interleaved.push(gp[i]);
-  }
-  const combined = dedupListings(interleaved);
+  const as24 = await fetchAS24(params, 'nl', 12);
+  const combined = dedupListings(as24);
 
   // Store for future DB hits
   const insert = db.prepare(`
@@ -492,7 +424,7 @@ const TOOLS = [
   },
   {
     name: 'search',
-    description: 'Find used car listings in the Netherlands (AutoScout24 + Gaspedaal). Returns listings with price, mileage, city, and URL.',
+    description: 'Find used car listings in the Netherlands (AutoScout24). Returns listings with price, mileage, city, and URL.',
     inputSchema: {
       type: 'object',
       properties: {

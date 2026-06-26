@@ -109,9 +109,6 @@ async function ensureKnowledge(make, model) {
 // ── Listing fetchers ──────────────────────────────────────────────────────────
 const AS24_DOMAIN  = { nl: 'autoscout24.nl', de: 'autoscout24.de' };
 const AS24_COUNTRY = { nl: 'NL', de: 'DE' };
-const GP_FUEL      = { B: 'benzine', D: 'diesel', E: 'elektrisch', H: 'hybride', L: 'lpg' };
-const GP_TRANS     = { A: 'AUTOMATISCH', M: 'HANDGESCHAKELD' };
-const GP_BODY      = { SUV: 'suv', hatchback: 'hatchback', estate: 'stationwagon', sedan: 'sedan', coupe: 'coupe', cabrio: 'cabriolet', offroad: 'terreinwagen' };
 const BODY_CODE    = { SUV: '4', hatchback: '1', estate: '5', sedan: '6', coupe: '3', cabrio: '2', offroad: '7' };
 
 async function fetchAS24(params, lang = 'nl', limit = 12) {
@@ -162,50 +159,6 @@ async function fetchAS24(params, lang = 'nl', limit = 12) {
   } catch { return []; }
 }
 
-async function fetchGaspedaal(params, limit = 8) {
-  let path = '/auto';
-  if (params.make) { path = `/${params.make}`; if (params.model) path += `/${params.model}`; }
-  const q = new URLSearchParams({ srt: 'df-a' });
-  if (params.priceMax) q.set('pmax', params.priceMax);
-  if (params.priceMin) q.set('pmin', params.priceMin);
-  if (params.kmMax)    q.set('kmax', params.kmMax);
-  if (params.yearFrom) q.set('bmin', params.yearFrom);
-  if (params.yearTo)   q.set('bmax', params.yearTo);
-  if (params.fuel && GP_FUEL[params.fuel]) q.set('brnst', GP_FUEL[params.fuel]);
-  if (params.transmission && GP_TRANS[params.transmission]) q.set('trns', GP_TRANS[params.transmission]);
-  if (params.body && GP_BODY[params.body]) q.set('crs', GP_BODY[params.body]);
-  try {
-    const res = await fetch(`https://www.gaspedaal.nl${path}?${q}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,*/*;q=0.8', 'Accept-Language': 'nl-NL,nl;q=0.9' },
-      signal: AbortSignal.timeout(10000),
-    });
-    if (!res.ok) return [];
-    const html = await res.text();
-    const listings = [];
-    const idRe = /\\"advertentieId\\":(\d+)/g;
-    let m;
-    while ((m = idRe.exec(html)) !== null && listings.length < limit) {
-      const idPos     = m.index;
-      const lookback  = html.slice(Math.max(0, idPos - 5000), idPos);
-      const statusIdx = lookback.lastIndexOf('\\"beschikbaarheidsStatus\\":\\"beschikbaar\\"');
-      const chunkStart = statusIdx >= 0 ? (idPos - lookback.length + statusIdx) : Math.max(0, idPos - 5000);
-      const chunk = html.slice(chunkStart, idPos + 400);
-      const str = (f) => chunk.match(new RegExp('\\\\"' + f + '\\\\":\\\\"([^"\\\\]*)\\\\\"'))?.[1] ?? '';
-      const num = (f) => { const n = chunk.match(new RegExp('\\\\"' + f + '\\\\":([0-9]+)')); return n ? parseInt(n[1]) : 0; };
-      const make = str('merknaam'), price = num('totaal');
-      if (!make || !price) continue;
-      listings.push({
-        make, model: str('modelnaam'), variant: str('uitvoering'),
-        year: String(num('bouwjaar') || ''), price_raw: '€ ' + String(price).replace(/\B(?=(\d{3})+(?!\d))/g, '.'),
-        price_int: price, mileage: num('kilometerstand'), fuel: str('brandstofsoort'),
-        transmission: str('transmissietype'), city: str('plaatsnaam'),
-        url: str('klikUrl'), image: str('fotoGroot'), seller: str('naamsvermelding'), platform: 'gaspedaal',
-      });
-    }
-    return listings;
-  } catch { return []; }
-}
-
 function dedupListings(listings) {
   const seen = new Set();
   return listings.filter(l => {
@@ -242,21 +195,18 @@ function upsertListings(listings) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function run() {
-  const total = { as24: 0, gp: 0, inserted: 0, updated: 0, knowledge: 0, errors: 0 };
+  const total = { as24: 0, inserted: 0, updated: 0, knowledge: 0, errors: 0 };
   for (let i = 0; i < combos.length; i++) {
     const { make, model } = combos[i];
     const t0 = Date.now();
     try {
-      const [as24, gp] = await Promise.all([
-        fetchAS24({ make, model }, 'nl', 12),
-        fetchGaspedaal({ make, model }, 8),
-      ]);
-      const combined = dedupListings([...as24, ...gp]);
+      const as24 = await fetchAS24({ make, model }, 'nl', 12);
+      const combined = dedupListings(as24);
       const { inserted, updated } = upsertListings(combined);
       const knowledge = await ensureKnowledge(make, model);
       const ms = Date.now() - t0;
-      console.log(`[crawler] ${make} ${model} — as24:${as24.length} gp:${gp.length} new:${inserted} upd:${updated} knowledge:${knowledge} (${ms}ms)`);
-      total.as24 += as24.length; total.gp += gp.length;
+      console.log(`[crawler] ${make} ${model} — as24:${as24.length} new:${inserted} upd:${updated} knowledge:${knowledge} (${ms}ms)`);
+      total.as24 += as24.length;
       total.inserted += inserted; total.updated += updated;
       if (knowledge === 'fetched') total.knowledge++;
     } catch (e) {
@@ -265,7 +215,7 @@ async function run() {
     }
     if (i < combos.length - 1) await sleep(10_000);
   }
-  console.log(`[crawler] Tier ${tier} done — as24:${total.as24} gp:${total.gp} new:${total.inserted} upd:${total.updated} knowledge_fetched:${total.knowledge} errors:${total.errors} — ${new Date().toISOString()}`);
+  console.log(`[crawler] Tier ${tier} done — as24:${total.as24} new:${total.inserted} upd:${total.updated} knowledge_fetched:${total.knowledge} errors:${total.errors} — ${new Date().toISOString()}`);
   db.close();
 }
 
