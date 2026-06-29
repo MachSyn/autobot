@@ -1,6 +1,6 @@
 // autobot — car advisor MCP
 // autobot.machsyn.com / autobot.machsyn.com/3.14  |  Port 3149
-// Tools: autobot · checkup · search
+// Tools: autobot · checkup · search · wegenbelasting
 
 import 'dotenv/config';
 import express      from 'express';
@@ -11,7 +11,9 @@ import Database from 'better-sqlite3';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT      = parseInt(process.env.PORT || '3149', 10);
-const VERSION   = '1.1.0';
+const VERSION   = '1.3.0';
+const bootedSessions = new Set(); // piPrivate → booted this server session
+const GATEWAY   = process.env.GATEWAY_MCP || 'https://pitr.network/3.14';
 
 const CAR_BRAIN  = readFileSync(join(__dirname, 'car_brain.md'), 'utf8');
 const AGENT_SPEC = readFileSync(join(__dirname, 'autobot_spec.md'), 'utf8');
@@ -254,6 +256,42 @@ function dedupListings(listings) {
   });
 }
 
+// ─── π save (fire and forget — only when PI + key are present) ───────────────
+
+function piPost(piPrivate, accessKey, content, name) {
+  const headers = {
+    'Content-Type':    'application/json',
+    'X-Pi-Private':    piPrivate,
+    'X-Pi-Access-Key': accessKey,
+  };
+  const body = JSON.stringify({
+    jsonrpc: '2.0', id: 1, method: 'tools/call',
+    params: { name: 'post', arguments: { to: 'self', content_type: 'md', name, content } },
+  });
+  fetch(GATEWAY, { method: 'POST', headers, body, signal: AbortSignal.timeout(15000) })
+    .catch(() => {});
+}
+
+function searchResultMd(args, result) {
+  const lines = [`# Autobot search — ${[args.make, args.model].filter(Boolean).join(' ') || 'all'}\n`];
+  for (const l of (result.listings || []).slice(0, 10)) {
+    lines.push(`- [${[l.make, l.model, l.variant, l.year].filter(Boolean).join(' ')} — €${l.price_raw || '?'} · ${l.mileage ? l.mileage.toLocaleString('nl') + ' km' : '?'} · ${l.city || '?'}](${l.url})`);
+  }
+  return lines.join('\n');
+}
+
+function checkupResultMd(make, model, result) {
+  const lines = [`# Autobot checkup — ${make} ${model}\n`];
+  for (const s of (result.summaries || [])) {
+    lines.push(`**${s.source}:** ${s.summary}\n`);
+  }
+  return lines.join('\n');
+}
+
+function wegenbelastingMd(result) {
+  return `# Wegenbelasting — ${result.merk || ''} ${result.model || ''} (${result.kenteken})\n\n- Jaar: ${result.jaar}\n- Brandstof: ${result.brandstof}\n- MRB: €${result.mrb_per_maand}/mnd · €${result.mrb_per_jaar}/jaar\n- ${result.mrb_note}`;
+}
+
 // ─── Tool handlers ────────────────────────────────────────────────────────────
 
 function toolAutobot() {
@@ -262,12 +300,12 @@ function toolAutobot() {
     identity: { nick: 'Autobot', version: VERSION },
     spec:     AGENT_SPEC,
     car_brain: CAR_BRAIN,
-    save_instructions: `After a good result, save it on π:
+    save_instructions: `If connected via π (private PI in session headers): search, checkup, and wegenbelasting results are saved to your π automatically.
+
+To connect for the first time:
 1. enter pitr.network/3.14
-2. If no pair yet: commission with your operator name via set(nick_operator, nick_agent)
-3. Note your private PI from the set response — that is your identity
-4. set(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
-5. post({ content: <conversation + listing URLs>, to: "self" }) — saves the result
+2. set(nick_operator, nick_agent) — commissions your pair, gives you a private PI
+3. set(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
 Store the private PI in memory — it is your identity on π.`,
     help: `autobot        — boot (call every session start)
 checkup        — known issues + what to inspect for a make/model
@@ -494,17 +532,44 @@ async function handleRpc(req, body) {
   if (method === 'tools/call') {
     const name = params?.name;
     const args = params?.arguments ?? {};
+    const piPrivate = req.headers?.['x-pi-private'];
+    const piKey     = req.headers?.['x-pi-access-key'];
+    const BOOT_TOOLS = ['search', 'checkup', 'wegenbelasting'];
+    const sessionKey = piPrivate || null;
     let result;
+    let autoBoot = null;
     try {
-      if      (name === 'autobot')  result = toolAutobot();
-      else if (name === 'checkup')  result = await toolCheckup(args);
-      else if (name === 'search')   result = await toolSearch(args);
-      else if (name === 'wegenbelasting') result = await toolWegenbelasting(args);
-      else return err(id, -32601, `Unknown tool: ${name}`);
+      if (name === 'autobot') {
+        result = toolAutobot();
+        if (sessionKey) bootedSessions.add(sessionKey);
+      } else if (BOOT_TOOLS.includes(name)) {
+        if (sessionKey && !bootedSessions.has(sessionKey)) {
+          autoBoot = toolAutobot();
+          bootedSessions.add(sessionKey);
+        }
+        if      (name === 'checkup')        result = await toolCheckup(args);
+        else if (name === 'search')         result = await toolSearch(args);
+        else if (name === 'wegenbelasting') result = await toolWegenbelasting(args);
+      } else {
+        return err(id, -32601, `Unknown tool: ${name}`);
+      }
     } catch (e) {
       return err(id, -32000, String(e));
     }
-    return ok(id, { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
+    if (piPrivate && piKey) {
+      const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+      if (name === 'search' && result.listings?.length > 0) {
+        piPost(piPrivate, piKey, searchResultMd(args, result), `autobot_search_${ts}.md`);
+      } else if (name === 'checkup' && result.summaries?.length > 0) {
+        piPost(piPrivate, piKey, checkupResultMd(args.make, args.model, result), `autobot_checkup_${args.make}_${args.model}_${ts}.md`);
+      } else if (name === 'wegenbelasting' && result.kenteken && !result.error) {
+        piPost(piPrivate, piKey, wegenbelastingMd(result), `autobot_wrb_${result.kenteken}_${ts}.md`);
+      }
+    }
+    const payload = autoBoot
+      ? { note: 'autobot booted automatically — call autobot explicitly at session start next time', boot: autoBoot, [name]: result }
+      : result;
+    return ok(id, { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] });
   }
 
   return err(id, -32601, `Unknown method: ${method}`);
@@ -515,7 +580,7 @@ async function handleRpc(req, body) {
 const app = express();
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => {
-  res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type,X-Pi-Access-Key' });
+  res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type,X-Pi-Private,X-Pi-Access-Key' });
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
