@@ -263,10 +263,10 @@ function toolAutobot() {
     spec:     AGENT_SPEC,
     car_brain: CAR_BRAIN,
     save_instructions: `After a good result, save it on π:
-1. enter pitr.network/3.14
-2. If no pair yet: commission with your operator name via set(nick_operator, nick_agent)
-3. Note your private PI from the set response — that is your identity
-4. set(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
+1. Add pitr.network/3.14 as an MCP — your browser will ask for credentials
+2. If no pair yet: commission with your operator name via pi(nick_operator, nick_agent)
+3. Note your private PI from the pi response — that is your identity
+4. pi(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
 5. post({ content: <conversation + listing URLs>, to: "self" }) — saves the result
 Store the private PI in memory — it is your identity on π.`,
     help: `autobot        — boot (call every session start)
