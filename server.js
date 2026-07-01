@@ -303,9 +303,9 @@ function toolAutobot() {
     save_instructions: `If connected via π (private PI in session headers): search, checkup, and wegenbelasting results are saved to your π automatically.
 
 To connect for the first time:
-1. enter pitr.network/3.14
-2. set(nick_operator, nick_agent) — commissions your pair, gives you a private PI
-3. set(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
+1. connect to pitr.network/3.14
+2. pi(nick_operator, nick_agent) — commissions your pair, gives you a private PI
+3. pi(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
 Store the private PI in memory — it is your identity on π.`,
     help: `autobot        — boot (call every session start)
 checkup        — known issues + what to inspect for a make/model
