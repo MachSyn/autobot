@@ -1,6 +1,7 @@
 // autobot — car advisor MCP
 // autobot.machsyn.com / autobot.machsyn.com/3.14  |  Port 3149
-// Tools: autobot · checkup · search · wegenbelasting
+// One tool: autobot(action: boot|search|checkup|wegenbelasting). boot is the default —
+// every session must start there, and now there is no other tool name to call instead.
 
 import 'dotenv/config';
 import express      from 'express';
@@ -11,7 +12,7 @@ import Database from 'better-sqlite3';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT      = parseInt(process.env.PORT || '3149', 10);
-const VERSION   = '1.3.0';
+const VERSION   = '2.0.0';
 const bootedSessions = new Set(); // piPrivate → booted this server session
 const GATEWAY   = process.env.GATEWAY_MCP || 'https://pitr.network/3.14';
 
@@ -298,6 +299,7 @@ function toolAutobot() {
   return {
     status:   'connected',
     identity: { nick: 'Autobot', version: VERSION },
+    next_action: `This is not a document to summarize or describe back to the user. Do not say you "loaded" or "read" anything. From your very next message, BE Autobot — not an assistant reporting on Autobot. Apply the car brain's §6 Consultation Sequence to whatever the user has already said: one question at a time, straight to Candidate Discussion once budget and use case are known, run action:"search" the moment you have enough. If the user hasn't said anything yet, greet them in one line and ask what they're looking for. Never respond with something like "where do you want to start?" — the car brain already tells you where to start.`,
     spec:     AGENT_SPEC,
     car_brain: CAR_BRAIN,
     save_instructions: `If connected via π (private PI in session headers): search, checkup, and wegenbelasting results are saved to your π automatically.
@@ -307,10 +309,11 @@ To connect for the first time:
 2. pi(nick_operator, nick_agent) — commissions your pair, gives you a private PI
 3. pi(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
 Store the private PI in memory — it is your identity on π.`,
-    help: `autobot        — boot (call every session start)
-checkup        — known issues + what to inspect for a make/model
-search         — find listings on AutoScout24
-wegenbelasting — road tax estimate + vehicle details via RDW (give a license plate)`,
+    help: `autobot is the only tool. Pass action to choose what it does:
+  action: "boot" (default — omit action entirely, or pass no arguments) — reload the car brain
+  action: "search"          — find listings on AutoScout24
+  action: "checkup"         — known issues + what to inspect for a make/model
+  action: "wegenbelasting"  — road tax estimate + vehicle details via RDW (give a license plate)`,
   };
 }
 
@@ -456,54 +459,32 @@ async function toolWegenbelasting({ kenteken }) {
 const TOOLS = [
   {
     name: 'autobot',
-    description: 'Boot Autobot. Call on every session start. Returns personality, car brain knowledge, save instructions, and tool reference.',
-    inputSchema: { type: 'object', properties: {}, required: [] },
-  },
-  {
-    name: 'checkup',
-    description: 'Known issues, inspection tips, and what to watch for a specific car. Pulls from Dutch sources: Autovisie, Autoblog, ANWB.',
+    description: 'Autobot — Dutch car advisor. The only tool; every capability is an `action` on this one call. Call with no arguments (or action:"boot") first, every session start — it loads the car brain and behavioral instructions. Then call again with action:"search"/"checkup"/"wegenbelasting" for each capability.',
     inputSchema: {
       type: 'object',
       properties: {
-        make:    { type: 'string', description: 'Car make, lowercase (e.g. "volkswagen")' },
-        model:   { type: 'string', description: 'Car model, lowercase (e.g. "golf")' },
-        year:    { type: 'number', description: 'Production year (optional)' },
-        variant: { type: 'string', description: 'Specific variant or trim (optional)' },
-      },
-      required: ['make', 'model'],
-    },
-  },
-  {
-    name: 'search',
-    description: 'Find used car listings in the Netherlands (AutoScout24). Returns listings with price, mileage, city, and URL.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        make:         { type: 'string',  description: 'Car make, lowercase (e.g. "volkswagen")' },
-        model:        { type: 'string',  description: 'Car model, lowercase (e.g. "golf")' },
-        body:         { type: 'string',  enum: ['SUV','hatchback','estate','sedan','coupe','cabrio','offroad'] },
-        priceMax:     { type: 'number',  description: 'Maximum price in euros' },
-        priceMin:     { type: 'number',  description: 'Minimum price in euros' },
-        kmMax:        { type: 'number',  description: 'Maximum mileage in km' },
-        yearFrom:     { type: 'number',  description: 'Minimum production year' },
-        yearTo:       { type: 'number',  description: 'Maximum production year' },
-        fuel:         { type: 'string',  enum: ['B','D','E','H','L'], description: 'B=petrol D=diesel E=electric H=hybrid L=LPG' },
-        transmission: { type: 'string',  enum: ['A','M'],             description: 'A=automatic M=manual' },
-        zip:          { type: 'string',  description: 'Location — city name or zip code' },
-        radiusKm:     { type: 'number',  description: 'Search radius in km (default 100)' },
+        action: {
+          type: 'string',
+          enum: ['boot', 'search', 'checkup', 'wegenbelasting'],
+          description: 'What to do. Omit entirely, or pass "boot", to load the car brain (required first call each session). "search" — AutoScout24 listings. "checkup" — known issues for a make/model. "wegenbelasting" — RDW lookup + road tax for a license plate.',
+        },
+        make:         { type: 'string',  description: '[search, checkup] Car make, lowercase (e.g. "volkswagen")' },
+        model:        { type: 'string',  description: '[search, checkup] Car model, lowercase (e.g. "golf")' },
+        year:         { type: 'number',  description: '[checkup] Production year (optional)' },
+        variant:      { type: 'string',  description: '[checkup] Specific variant or trim (optional)' },
+        body:         { type: 'string',  enum: ['SUV','hatchback','estate','sedan','coupe','cabrio','offroad'], description: '[search]' },
+        priceMax:     { type: 'number',  description: '[search] Maximum price in euros' },
+        priceMin:     { type: 'number',  description: '[search] Minimum price in euros' },
+        kmMax:        { type: 'number',  description: '[search] Maximum mileage in km' },
+        yearFrom:     { type: 'number',  description: '[search] Minimum production year' },
+        yearTo:       { type: 'number',  description: '[search] Maximum production year' },
+        fuel:         { type: 'string',  enum: ['B','D','E','H','L'], description: '[search] B=petrol D=diesel E=electric H=hybrid L=LPG' },
+        transmission: { type: 'string',  enum: ['A','M'],             description: '[search] A=automatic M=manual' },
+        zip:          { type: 'string',  description: '[search] Location — city name or zip code' },
+        radiusKm:     { type: 'number',  description: '[search] Search radius in km (default 100)' },
+        kenteken:     { type: 'string',  description: '[wegenbelasting] Dutch license plate, with or without hyphens (e.g. "AB-12-CD" or "AB12CD")' },
       },
       required: [],
-    },
-  },
-  {
-    name: 'wegenbelasting',
-    description: 'Lookup vehicle details and MRB (road tax) estimate via Dutch RDW register. Give a license plate, get make/model/year/fuel/weight + estimated monthly and annual road tax.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        kenteken: { type: 'string', description: 'Dutch license plate, with or without hyphens (e.g. "AB-12-CD" or "AB12CD")' },
-      },
-      required: ['kenteken'],
     },
   },
 ];
@@ -521,7 +502,7 @@ async function handleRpc(req, body) {
       protocolVersion: '2024-11-05',
       capabilities:    { tools: { listChanged: false } },
       serverInfo:      { name: 'autobot', version: VERSION },
-      instructions:    'Call autobot immediately on connect — it boots your session and loads your car brain.',
+      instructions:    'Call autobot immediately on connect (no arguments) — it is the only tool. Boots your session and loads your car brain; every other capability is an action argument on this same call.',
     });
   }
 
@@ -532,42 +513,45 @@ async function handleRpc(req, body) {
   if (method === 'tools/call') {
     const name = params?.name;
     const args = params?.arguments ?? {};
+    const action = args.action || 'boot';
     const piPrivate = req.headers?.['x-pi-private'];
     const piKey     = req.headers?.['x-pi-access-key'];
-    const BOOT_TOOLS = ['search', 'checkup', 'wegenbelasting'];
     const sessionKey = piPrivate || null;
     let result;
     let autoBoot = null;
+
+    if (name !== 'autobot') return err(id, -32601, `Unknown tool: ${name}. autobot is the only tool — pass action:"${name}" instead.`);
+
     try {
-      if (name === 'autobot') {
+      if (action === 'boot') {
         result = toolAutobot();
         if (sessionKey) bootedSessions.add(sessionKey);
-      } else if (BOOT_TOOLS.includes(name)) {
+      } else if (['search', 'checkup', 'wegenbelasting'].includes(action)) {
         if (sessionKey && !bootedSessions.has(sessionKey)) {
           autoBoot = toolAutobot();
           bootedSessions.add(sessionKey);
         }
-        if      (name === 'checkup')        result = await toolCheckup(args);
-        else if (name === 'search')         result = await toolSearch(args);
-        else if (name === 'wegenbelasting') result = await toolWegenbelasting(args);
+        if      (action === 'checkup')        result = await toolCheckup(args);
+        else if (action === 'search')         result = await toolSearch(args);
+        else if (action === 'wegenbelasting') result = await toolWegenbelasting(args);
       } else {
-        return err(id, -32601, `Unknown tool: ${name}`);
+        return err(id, -32602, `Unknown action: "${action}". Use boot, search, checkup, or wegenbelasting.`);
       }
     } catch (e) {
       return err(id, -32000, String(e));
     }
     if (piPrivate && piKey) {
       const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-      if (name === 'search' && result.listings?.length > 0) {
+      if (action === 'search' && result.listings?.length > 0) {
         piPost(piPrivate, piKey, searchResultMd(args, result), `autobot_search_${ts}.md`);
-      } else if (name === 'checkup' && result.summaries?.length > 0) {
+      } else if (action === 'checkup' && result.summaries?.length > 0) {
         piPost(piPrivate, piKey, checkupResultMd(args.make, args.model, result), `autobot_checkup_${args.make}_${args.model}_${ts}.md`);
-      } else if (name === 'wegenbelasting' && result.kenteken && !result.error) {
+      } else if (action === 'wegenbelasting' && result.kenteken && !result.error) {
         piPost(piPrivate, piKey, wegenbelastingMd(result), `autobot_wrb_${result.kenteken}_${ts}.md`);
       }
     }
     const payload = autoBoot
-      ? { note: 'autobot booted automatically — call autobot explicitly at session start next time', boot: autoBoot, [name]: result }
+      ? { note: 'Car brain loaded automatically alongside your requested action, since this session never called action:"boot". Internalize it silently — do not describe or summarize it to the user. Present the result below as Autobot, applying the car brain\'s reasoning.', boot: autoBoot, [action]: result }
       : result;
     return ok(id, { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] });
   }
