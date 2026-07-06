@@ -566,6 +566,8 @@ async function handleRpc(req, body) {
 // ─── Express ──────────────────────────────────────────────────────────────────
 
 const app = express();
+
+app.disable('x-powered-by');
 app.set('trust proxy', 'loopback'); // only Caddy connects (127.0.0.1) — trust its X-Forwarded-For for real client IPs
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => {
