@@ -5,6 +5,7 @@
 
 import 'dotenv/config';
 import express      from 'express';
+import rateLimit     from 'express-rate-limit';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -565,11 +566,22 @@ async function handleRpc(req, body) {
 // ─── Express ──────────────────────────────────────────────────────────────────
 
 const app = express();
+app.set('trust proxy', 'loopback'); // only Caddy connects (127.0.0.1) — trust its X-Forwarded-For for real client IPs
 app.use(express.json({ limit: '2mb' }));
 app.use((req, res, next) => {
   res.set({ 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type,X-Pi-Private,X-Pi-Access-Key' });
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
+});
+
+// checkup/search can each trigger real Brave Search + Anthropic API spend per call
+// (only cached per make/model, not per-caller) — cap request rate per client IP.
+const rpcLimiter = rateLimit({
+  windowMs: 60_000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many requests, slow down.' },
 });
 
 // SSE transport
@@ -585,12 +597,12 @@ app.get('/3.14/sse', (req, res) => {
   req.on('close', () => clearInterval(ping));
 });
 
-app.post('/3.14', async (req, res) => {
+app.post('/3.14', rpcLimiter, async (req, res) => {
   if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   return res.json(await handleRpc(req, req.body));
 });
 
-app.post('/3.14/messages', async (req, res) => {
+app.post('/3.14/messages', rpcLimiter, async (req, res) => {
   if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
   return res.json(await handleRpc(req, req.body));
 });
