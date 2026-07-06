@@ -260,11 +260,14 @@ function dedupListings(listings) {
 // ─── π save (fire and forget — only when PI + key are present) ───────────────
 
 function piPost(piPrivate, accessKey, content, name) {
+  // Always attempt the save with just piPrivate - an access key is this instance's own
+  // policy, not a federation-wide requirement. Whichever gateway the caller is actually
+  // paired with decides whether it's needed.
   const headers = {
     'Content-Type':    'application/json',
     'X-Pi-Private':    piPrivate,
-    'X-Pi-Access-Key': accessKey,
   };
+  if (accessKey) headers['X-Pi-Access-Key'] = accessKey;
   const body = JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'tools/call',
     params: { name: 'post', arguments: { to: 'self', content_type: 'md', name, content } },
@@ -540,7 +543,7 @@ async function handleRpc(req, body) {
     } catch (e) {
       return err(id, -32000, String(e));
     }
-    if (piPrivate && piKey) {
+    if (piPrivate) {
       const ts = new Date().toISOString().slice(0, 10).replace(/-/g, '');
       if (action === 'search' && result.listings?.length > 0) {
         piPost(piPrivate, piKey, searchResultMd(args, result), `autobot_search_${ts}.md`);
