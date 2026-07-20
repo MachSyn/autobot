@@ -393,20 +393,26 @@ async function toolSearch(args) {
   };
 
   // DB-first
+  const TRANS_NL = { A: 'automat', M: 'handgeschakeld' }; // 'automat' matches "Automatisch" but not "Half/Semi-automaat" (double a breaks the substring)
   let query = 'SELECT * FROM listings WHERE 1=1';
   const qArgs = [];
-  if (params.make)     { query += ' AND LOWER(make) = ?';  qArgs.push(params.make); }
-  if (params.model)    { query += ' AND LOWER(model) = ?'; qArgs.push(params.model); }
-  if (params.priceMax) { query += ' AND price_int > 0 AND price_int <= ?'; qArgs.push(params.priceMax); }
-  if (params.priceMin) { query += ' AND price_int >= ?';   qArgs.push(params.priceMin); }
-  if (params.kmMax)    { query += ' AND mileage <= ?';     qArgs.push(params.kmMax); }
-  if (params.yearFrom) { query += ' AND CAST(year AS INTEGER) >= ?'; qArgs.push(params.yearFrom); }
-  if (params.yearTo)   { query += ' AND CAST(year AS INTEGER) <= ?'; qArgs.push(params.yearTo); }
-  if (params.fuel)     { query += ' AND LOWER(fuel) LIKE ?'; qArgs.push('%' + params.fuel.toLowerCase() + '%'); }
+  if (params.make)         { query += ' AND LOWER(make) = ?';  qArgs.push(params.make); }
+  if (params.model)        { query += ' AND LOWER(model) = ?'; qArgs.push(params.model); }
+  if (params.priceMax)     { query += ' AND price_int > 0 AND price_int <= ?'; qArgs.push(params.priceMax); }
+  if (params.priceMin)     { query += ' AND price_int >= ?';   qArgs.push(params.priceMin); }
+  if (params.kmMax)        { query += ' AND mileage <= ?';     qArgs.push(params.kmMax); }
+  if (params.yearFrom)     { query += ' AND CAST(year AS INTEGER) >= ?'; qArgs.push(params.yearFrom); }
+  if (params.yearTo)       { query += ' AND CAST(year AS INTEGER) <= ?'; qArgs.push(params.yearTo); }
+  if (params.fuel)         { query += ' AND LOWER(fuel) LIKE ?'; qArgs.push('%' + params.fuel.toLowerCase() + '%'); }
+  if (params.transmission && TRANS_NL[params.transmission]) { query += ' AND LOWER(transmission) LIKE ?'; qArgs.push('%' + TRANS_NL[params.transmission] + '%'); }
   query += ' ORDER BY crawled_at DESC LIMIT 20';
 
+  // body isn't a stored column at all (never captured from AS24 into the listings
+  // table), so it can't be filtered against cache yet — only applies on a live fetch.
   const dbResults = db.prepare(query).all(...qArgs);
-  if (dbResults.length >= 3) {
+  const STALE_MS = 3 * 24 * 60 * 60 * 1000; // models outside the crawler's ~180-combo list only ever get cached once and otherwise never refresh
+  const freshEnough = dbResults.length > 0 && (Date.now() - new Date(dbResults[0].crawled_at).getTime()) < STALE_MS;
+  if (dbResults.length >= 3 && freshEnough) {
     const dbWithImages = addImageMd(dbResults);
     const { known_issues, queued } = attachKnowledge(dbWithImages);
     return {
@@ -417,7 +423,7 @@ async function toolSearch(args) {
   }
 
   // Live fallback
-  const as24 = await fetchAS24(params, 'nl', 12);
+  const as24 = await fetchAS24(params, 'nl', 20); // AS24's default page size — we only ever fetch one page, no reason to truncate below what it already returns
   const combined = dedupListings(as24);
 
   // Store for future DB hits
