@@ -184,21 +184,29 @@ function getKnowledge(make, model) {
 const AS24_DOMAIN  = { nl: 'autoscout24.nl', de: 'autoscout24.de' };
 const AS24_COUNTRY = { nl: 'NL', de: 'DE' };
 
-async function fetchAS24(params, lang = 'nl', limit = 12) {
+// AS24 doesn't filter fuel/body via query params at all — confirmed live: a fuelc=E
+// query param silently returned unfiltered petrol results. The real mechanism is a
+// path segment (/lst/make/model/ft_<slug>, /bt_<slug>), same convention AS24 uses for
+// variant (ve_*), offer type (ot_*), and colour (bc_*) facets — reverse-engineered from
+// the site's own interlinking data. transmission's `gear` query param IS correct
+// (verified live: gear=M returns only manual listings) — left as-is.
+const FUEL_SLUG = { B: 'benzine', D: 'diesel', E: 'elektrisch', H: 'elektro-benzine', L: 'lpg' }; // H picks the petrol-hybrid slug (374 rows) over the rare diesel-hybrid variant (1 row) — AS24 has no single unified "hybrid" slug
+const BODY_SLUG = { SUV: 'suv-off-road-pick-up', hatchback: 'hatchback', estate: 'stationwagen', sedan: 'sedan', coupe: 'coupe', cabrio: 'cabrio', offroad: 'suv-off-road-pick-up' }; // AS24 doesn't distinguish SUV from off-road/pick-up — both are one category there
+
+async function fetchAS24(params, lang = 'nl', limit = 40) {
   const domain  = AS24_DOMAIN[lang]  ?? AS24_DOMAIN.nl;
   const country = AS24_COUNTRY[lang] ?? 'NL';
   let path = '/lst';
   if (params.make)  path += `/${params.make}`;
   if (params.model) path += `/${params.model}`;
-  const q = new URLSearchParams({ atype: 'C', cy: country, desc: '0', ustate: 'N,U', sort: 'standard', source: 'detailsearch' });
-  const BODY_CODE = { SUV: '4', hatchback: '1', estate: '5', sedan: '6', coupe: '3', cabrio: '2', offroad: '7' };
-  if (params.body && BODY_CODE[params.body]) q.set('body', BODY_CODE[params.body]);
+  if (params.fuel && FUEL_SLUG[params.fuel]) path += `/ft_${FUEL_SLUG[params.fuel]}`;
+  if (params.body && BODY_SLUG[params.body]) path += `/bt_${BODY_SLUG[params.body]}`;
+  const q = new URLSearchParams({ atype: 'C', cy: country, desc: '0', ustate: 'N,U', sort: 'standard', source: 'detailsearch', page: '1', size: String(Math.max(limit, 20)) });
   if (params.priceMax)     q.set('priceto',   params.priceMax);
   if (params.priceMin)     q.set('pricefrom', params.priceMin);
   if (params.kmMax)        q.set('kmto',      params.kmMax);
   if (params.yearFrom)     q.set('fregfrom',  String(params.yearFrom));
   if (params.yearTo)       q.set('fregto',    String(params.yearTo));
-  if (params.fuel)         q.set('fuelc',     params.fuel);
   if (params.transmission) q.set('gear',      params.transmission);
   if (params.zip) { q.set('zip', params.zip); q.set('zipr', String(params.radiusKm ?? 100)); }
   const searchUrl = `https://www.${domain}${path}?${q}`;
@@ -207,15 +215,16 @@ async function fetchAS24(params, lang = 'nl', limit = 12) {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'text/html,*/*;q=0.8', 'Accept-Language': 'nl-NL,nl;q=0.9' },
       signal: AbortSignal.timeout(12000),
     });
-    if (!res.ok) return [];
+    if (!res.ok) return { listings: [], totalAvailable: 0 };
     const html = await res.text();
     const match = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
-    if (!match) return [];
+    if (!match) return { listings: [], totalAvailable: 0 };
     let data;
-    try { data = JSON.parse(match[1]); } catch { return []; }
+    try { data = JSON.parse(match[1]); } catch { return { listings: [], totalAvailable: 0 }; }
+    const totalAvailable = data?.props?.pageProps?.numberOfResults ?? 0;
     const raw = data?.props?.pageProps?.listings ?? [];
     const seen = new Set();
-    return raw
+    const listings = raw
       .filter(l => { const k = l.crossReferenceId || l.id; if (seen.has(k)) return false; seen.add(k); return true; })
       .slice(0, limit)
       .map(l => {
@@ -238,7 +247,8 @@ async function fetchAS24(params, lang = 'nl', limit = 12) {
           platform:     'as24',
         };
       });
-  } catch { return []; }
+    return { listings, totalAvailable };
+  } catch { return { listings: [], totalAvailable: 0 }; }
 }
 
 
@@ -316,7 +326,7 @@ To connect for the first time:
 Store the private PI in memory — it is your identity on π.`,
     help: `autobot is the only tool. Pass action to choose what it does:
   action: "boot" (default — omit action entirely, or pass no arguments) — reload the car brain
-  action: "search"          — find listings on AutoScout24. Also attaches cached reliability summaries (known_issues) per distinct make/model in the results, and silently queues a background lookup for any that aren't cached yet.
+  action: "search"          — find listings on AutoScout24. Response includes totalAvailable (the real total match count) separately from total (how many are actually shown) — never treat a small "total" as "this is everything on the market". Also attaches cached reliability summaries (known_issues) per distinct make/model in the results, and silently queues a background lookup for any that aren't cached yet.
   action: "checkup"         — known issues + what to inspect for a make/model. Call this before naming any car to the user, not just when they ask.
   action: "wegenbelasting"  — road tax estimate + vehicle details via RDW (give a license plate)`,
   };
@@ -394,36 +404,39 @@ async function toolSearch(args) {
 
   // DB-first
   const TRANS_NL = { A: 'automat', M: 'handgeschakeld' }; // 'automat' matches "Automatisch" but not "Half/Semi-automaat" (double a breaks the substring)
-  let query = 'SELECT * FROM listings WHERE 1=1';
+  const FUEL_NL  = { B: ['benzine'], D: ['diesel'], E: ['elektrisch'], H: ['elektro/benzine', 'elektro/diesel'], L: ['lpg'] }; // exact values, not substrings — a stray-letter LIKE match here previously matched almost everything for E/H/L
+  let where = ' WHERE 1=1';
   const qArgs = [];
-  if (params.make)         { query += ' AND LOWER(make) = ?';  qArgs.push(params.make); }
-  if (params.model)        { query += ' AND LOWER(model) = ?'; qArgs.push(params.model); }
-  if (params.priceMax)     { query += ' AND price_int > 0 AND price_int <= ?'; qArgs.push(params.priceMax); }
-  if (params.priceMin)     { query += ' AND price_int >= ?';   qArgs.push(params.priceMin); }
-  if (params.kmMax)        { query += ' AND mileage <= ?';     qArgs.push(params.kmMax); }
-  if (params.yearFrom)     { query += ' AND CAST(year AS INTEGER) >= ?'; qArgs.push(params.yearFrom); }
-  if (params.yearTo)       { query += ' AND CAST(year AS INTEGER) <= ?'; qArgs.push(params.yearTo); }
-  if (params.fuel)         { query += ' AND LOWER(fuel) LIKE ?'; qArgs.push('%' + params.fuel.toLowerCase() + '%'); }
-  if (params.transmission && TRANS_NL[params.transmission]) { query += ' AND LOWER(transmission) LIKE ?'; qArgs.push('%' + TRANS_NL[params.transmission] + '%'); }
-  query += ' ORDER BY crawled_at DESC LIMIT 20';
+  if (params.make)         { where += ' AND LOWER(make) = ?';  qArgs.push(params.make); }
+  if (params.model)        { where += ' AND LOWER(model) = ?'; qArgs.push(params.model); }
+  if (params.priceMax)     { where += ' AND price_int > 0 AND price_int <= ?'; qArgs.push(params.priceMax); }
+  if (params.priceMin)     { where += ' AND price_int >= ?';   qArgs.push(params.priceMin); }
+  if (params.kmMax)        { where += ' AND mileage <= ?';     qArgs.push(params.kmMax); }
+  if (params.yearFrom)     { where += ' AND CAST(year AS INTEGER) >= ?'; qArgs.push(params.yearFrom); }
+  if (params.yearTo)       { where += ' AND CAST(year AS INTEGER) <= ?'; qArgs.push(params.yearTo); }
+  if (params.fuel && FUEL_NL[params.fuel]) { where += ` AND LOWER(fuel) IN (${FUEL_NL[params.fuel].map(() => '?').join(',')})`; qArgs.push(...FUEL_NL[params.fuel]); }
+  if (params.transmission && TRANS_NL[params.transmission]) { where += ' AND LOWER(transmission) LIKE ?'; qArgs.push('%' + TRANS_NL[params.transmission] + '%'); }
 
   // body isn't a stored column at all (never captured from AS24 into the listings
-  // table), so it can't be filtered against cache yet — only applies on a live fetch.
-  const dbResults = db.prepare(query).all(...qArgs);
+  // table), so cached rows can't be filtered by it — a body-filtered search always
+  // skips the cache path below and goes live, where it's filtered correctly.
+  const totalCached = db.prepare('SELECT COUNT(*) AS n FROM listings' + where).get(...qArgs).n;
+  const dbResults = db.prepare('SELECT * FROM listings' + where + ' ORDER BY crawled_at DESC LIMIT 20').all(...qArgs);
   const STALE_MS = 3 * 24 * 60 * 60 * 1000; // models outside the crawler's ~180-combo list only ever get cached once and otherwise never refresh
   const freshEnough = dbResults.length > 0 && (Date.now() - new Date(dbResults[0].crawled_at).getTime()) < STALE_MS;
-  if (dbResults.length >= 3 && freshEnough) {
+  if (dbResults.length >= 3 && freshEnough && !params.body) {
     const dbWithImages = addImageMd(dbResults);
     const { known_issues, queued } = attachKnowledge(dbWithImages);
     return {
-      listings: dbWithImages, total: dbWithImages.length, source: 'db', crawled_at: dbResults[0]?.crawled_at,
+      listings: dbWithImages, total: dbWithImages.length, totalAvailable: totalCached, source: 'db', crawled_at: dbResults[0]?.crawled_at,
+      ...(totalCached > dbWithImages.length ? { note_totals: `${dbWithImages.length} shown out of ${totalCached} cached matches — narrow the filters to see a more targeted set.` } : {}),
       known_issues,
       ...(queued.length ? { knowledge_queued: queued, note: `No cached reliability data yet for: ${queued.join(', ')} — a background lookup was just triggered, available on the next search for these.` } : {}),
     };
   }
 
   // Live fallback
-  const as24 = await fetchAS24(params, 'nl', 20); // AS24's default page size — we only ever fetch one page, no reason to truncate below what it already returns
+  const { listings: as24, totalAvailable } = await fetchAS24(params, 'nl', 40);
   const combined = dedupListings(as24);
 
   // Store for future DB hits
@@ -443,7 +456,8 @@ async function toolSearch(args) {
   const liveWithImages = addImageMd(combined);
   const { known_issues, queued } = attachKnowledge(liveWithImages);
   return {
-    listings: liveWithImages, total: liveWithImages.length, source: 'live',
+    listings: liveWithImages, total: liveWithImages.length, totalAvailable, source: 'live',
+    ...(totalAvailable > liveWithImages.length ? { note_totals: `${liveWithImages.length} shown out of ${totalAvailable} total matches on AutoScout24 — narrow the filters (price/year/etc.) to see a more targeted set, don't treat these ${liveWithImages.length} as the whole market.` } : {}),
     known_issues,
     ...(queued.length ? { knowledge_queued: queued, note: `No cached reliability data yet for: ${queued.join(', ')} — a background lookup was just triggered, available on the next search for these.` } : {}),
   };
