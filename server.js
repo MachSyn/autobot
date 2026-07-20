@@ -303,20 +303,20 @@ function toolAutobot() {
   return {
     status:   'connected',
     identity: { nick: 'Autobot', version: VERSION },
-    next_action: `This is not a document to summarize or describe back to the user. Do not say you "loaded" or "read" anything. From your very next message, BE Autobot — not an assistant reporting on Autobot. Apply the car brain's §6 Consultation Sequence to whatever the user has already said: one question at a time, straight to Candidate Discussion once budget and use case are known, run action:"search" the moment you have enough. If the user hasn't said anything yet, greet them in one line and ask what they're looking for. Never respond with something like "where do you want to start?" — the car brain already tells you where to start.`,
+    next_action: `This is not a document to summarize or describe back to the user. Do not say you "loaded" or "read" anything. From your very next message, BE Autobot — not an assistant reporting on Autobot. Apply the car brain's §6 Consultation Sequence to whatever the user has already said: one question at a time, straight to Candidate Discussion once budget and use case are known, run action:"search" the moment you have enough. Before naming ANY specific make+model to the user — in Candidate Discussion or anywhere else, even before you've searched — call action:"checkup" for it first. A cache hit gives you real sourced knowledge to weave into your reasoning; a cache miss silently queues a background lookup so it's ready the next time this car comes up. Never skip this to save a turn — it's one extra tool call, not a question to the user. If the user hasn't said anything yet, greet them in one line and ask what they're looking for. Never respond with something like "where do you want to start?" — the car brain already tells you where to start.`,
     spec:     AGENT_SPEC,
     car_brain: CAR_BRAIN,
     save_instructions: `If connected via π (private PI in session headers): search, checkup, and wegenbelasting results are saved to your π automatically.
 
 To connect for the first time:
 1. connect to pitr.network/3.14
-2. pi(nick_operator, nick_agent) — commissions your pair, gives you a private PI
-3. pi(home_mcp: "autobot.machsyn.com/3.14") — reconnects you here next session
+2. ping(nick_operator, nick_agent) — commissions your pair, gives you a private PI
+3. add an explicit mount("autobot.machsyn.com") step to your own spec/personality, called post-boot — reconnects you here every session (home_mcp auto-mount is deprecated; this is the supported way to make a second server come up alongside π automatically)
 Store the private PI in memory — it is your identity on π.`,
     help: `autobot is the only tool. Pass action to choose what it does:
   action: "boot" (default — omit action entirely, or pass no arguments) — reload the car brain
-  action: "search"          — find listings on AutoScout24
-  action: "checkup"         — known issues + what to inspect for a make/model
+  action: "search"          — find listings on AutoScout24. Also attaches cached reliability summaries (known_issues) per distinct make/model in the results, and silently queues a background lookup for any that aren't cached yet.
+  action: "checkup"         — known issues + what to inspect for a make/model. Call this before naming any car to the user, not just when they ask.
   action: "wegenbelasting"  — road tax estimate + vehicle details via RDW (give a license plate)`,
   };
 }
@@ -343,6 +343,36 @@ async function toolCheckup(args) {
     make, model, summaries: [], source: 'car_brain',
     note: 'No source articles found. Apply general car_brain patterns for this make/segment.',
   };
+}
+
+function distinctMakeModels(listings) {
+  const seen = new Set(), out = [];
+  for (const l of listings) {
+    const make = (l.make || '').toLowerCase(), model = (l.model || '').toLowerCase();
+    if (!make || !model) continue;
+    const key = `${make}|${model}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ make, model });
+  }
+  return out;
+}
+
+// Cache-only read for whatever's already known, fire-and-forget seed for what isn't —
+// so a search never blocks on a live scrape, but a miss still queues one for next time.
+function attachKnowledge(listings) {
+  const known_issues = [];
+  const queued = [];
+  for (const { make, model } of distinctMakeModels(listings)) {
+    const cached = getKnowledge(make, model);
+    if (cached.length > 0) {
+      known_issues.push({ make, model, summaries: cached });
+    } else {
+      ensureKnowledge(make, model).catch(() => {});
+      queued.push(`${make} ${model}`);
+    }
+  }
+  return { known_issues, queued };
 }
 
 async function toolSearch(args) {
@@ -377,7 +407,12 @@ async function toolSearch(args) {
   const dbResults = db.prepare(query).all(...qArgs);
   if (dbResults.length >= 3) {
     const dbWithImages = addImageMd(dbResults);
-    return { listings: dbWithImages, total: dbWithImages.length, source: 'db', crawled_at: dbResults[0]?.crawled_at };
+    const { known_issues, queued } = attachKnowledge(dbWithImages);
+    return {
+      listings: dbWithImages, total: dbWithImages.length, source: 'db', crawled_at: dbResults[0]?.crawled_at,
+      known_issues,
+      ...(queued.length ? { knowledge_queued: queued, note: `No cached reliability data yet for: ${queued.join(', ')} — a background lookup was just triggered, available on the next search for these.` } : {}),
+    };
   }
 
   // Live fallback
@@ -399,7 +434,12 @@ async function toolSearch(args) {
   })(combined);
 
   const liveWithImages = addImageMd(combined);
-  return { listings: liveWithImages, total: liveWithImages.length, source: 'live' };
+  const { known_issues, queued } = attachKnowledge(liveWithImages);
+  return {
+    listings: liveWithImages, total: liveWithImages.length, source: 'live',
+    known_issues,
+    ...(queued.length ? { knowledge_queued: queued, note: `No cached reliability data yet for: ${queued.join(', ')} — a background lookup was just triggered, available on the next search for these.` } : {}),
+  };
 }
 
 
@@ -586,28 +626,37 @@ const rpcLimiter = rateLimit({
   message: { error: 'Too many requests, slow down.' },
 });
 
-// SSE transport
-app.get('/3.14/sse', (req, res) => {
-  const base = process.env.PUBLIC_URL ?? 'https://autobot.machsyn.com';
-  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
-  res.setHeader('X-Accel-Buffering', 'no');
-  res.flushHeaders();
-  res.write(`event: endpoint\ndata: ${JSON.stringify({ uri: `${base}/3.14/messages` })}\n\n`);
-  const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { clearInterval(ping); } }, 20_000);
-  req.on('close', () => clearInterval(ping));
-});
+// SSE transport — root is canonical (bare autobot.machsyn.com as a standalone
+// connector); /3.14/* is kept as an alias so existing pi mount("autobot.machsyn.com/3.14")
+// references keep working. Both hit the same handleRpc — no behavior differs by path.
+function sseHandler(messagesPath) {
+  return (req, res) => {
+    const base = process.env.PUBLIC_URL ?? 'https://autobot.machsyn.com';
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.write(`event: endpoint\ndata: ${JSON.stringify({ uri: `${base}${messagesPath}` })}\n\n`);
+    const ping = setInterval(() => { try { res.write(': ping\n\n'); } catch { clearInterval(ping); } }, 20_000);
+    req.on('close', () => clearInterval(ping));
+  };
+}
 
-app.post('/3.14', rpcLimiter, async (req, res) => {
-  if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  return res.json(await handleRpc(req, req.body));
-});
+function rpcHandler() {
+  return async (req, res) => {
+    if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
+    return res.json(await handleRpc(req, req.body));
+  };
+}
 
-app.post('/3.14/messages', rpcLimiter, async (req, res) => {
-  if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-  return res.json(await handleRpc(req, req.body));
-});
+app.get('/sse', sseHandler('/messages'));
+app.post('/', rpcLimiter, rpcHandler());
+app.post('/messages', rpcLimiter, rpcHandler());
+
+app.get('/3.14/sse', sseHandler('/3.14/messages'));
+app.post('/3.14', rpcLimiter, rpcHandler());
+app.post('/3.14/messages', rpcLimiter, rpcHandler());
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', version: VERSION }));
 
