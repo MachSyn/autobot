@@ -417,14 +417,14 @@ async function toolSearch(args) {
   if (params.fuel && FUEL_NL[params.fuel]) { where += ` AND LOWER(fuel) IN (${FUEL_NL[params.fuel].map(() => '?').join(',')})`; qArgs.push(...FUEL_NL[params.fuel]); }
   if (params.transmission && TRANS_NL[params.transmission]) { where += ' AND LOWER(transmission) LIKE ?'; qArgs.push('%' + TRANS_NL[params.transmission] + '%'); }
 
-  // body isn't a stored column at all (never captured from AS24 into the listings
-  // table), so cached rows can't be filtered by it — a body-filtered search always
-  // skips the cache path below and goes live, where it's filtered correctly.
+  // Neither body nor location (zip/radiusKm) is a stored column — no bodyType and no
+  // geocoding on cached rows — so cached rows can't be filtered by either. A search
+  // using either always skips the cache path below and goes live, filtered correctly.
   const totalCached = db.prepare('SELECT COUNT(*) AS n FROM listings' + where).get(...qArgs).n;
   const dbResults = db.prepare('SELECT * FROM listings' + where + ' ORDER BY crawled_at DESC LIMIT 20').all(...qArgs);
   const STALE_MS = 3 * 24 * 60 * 60 * 1000; // models outside the crawler's ~180-combo list only ever get cached once and otherwise never refresh
   const freshEnough = dbResults.length > 0 && (Date.now() - new Date(dbResults[0].crawled_at).getTime()) < STALE_MS;
-  if (dbResults.length >= 3 && freshEnough && !params.body) {
+  if (dbResults.length >= 3 && freshEnough && !params.body && !params.zip) {
     const dbWithImages = addImageMd(dbResults);
     const { known_issues, queued } = attachKnowledge(dbWithImages);
     return {
