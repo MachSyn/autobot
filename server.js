@@ -10,6 +10,7 @@ import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import Database from 'better-sqlite3';
+import { randomUUID } from 'crypto';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PORT      = parseInt(process.env.PORT || '3149', 10);
@@ -538,10 +539,14 @@ const TOOLS = [
 const ok  = (id, result) => ({ jsonrpc: '2.0', id, result });
 const err = (id, code, msg) => ({ jsonrpc: '2.0', id, error: { code, message: msg } });
 
-async function handleRpc(req, body) {
+async function handleRpc(req, res, body) {
   const { id, method, params } = body;
 
   if (method === 'initialize') {
+    // Standard MCP session id (Streamable HTTP transport) — set here, echoed back by
+    // any spec-compliant client on every subsequent call. This is what lets the
+    // auto-boot safety net below work for ANY caller, not just π-authenticated ones.
+    res.set('Mcp-Session-Id', randomUUID());
     return ok(id, {
       protocolVersion: '2024-11-05',
       capabilities:    { tools: { listChanged: false } },
@@ -560,7 +565,11 @@ async function handleRpc(req, body) {
     const action = args.action || 'boot';
     const piPrivate = req.headers?.['x-pi-private'];
     const piKey     = req.headers?.['x-pi-access-key'];
-    const sessionKey = piPrivate || null;
+    // Prefer the standard MCP session id; fall back to the π identity for older
+    // pi-mount callers that predate it. If neither is present, sessionKey stays
+    // null and we can't remember this caller across calls at all — in that case
+    // the code below defaults to re-booting every time rather than ever skipping it.
+    const sessionKey = req.headers?.['mcp-session-id'] || piPrivate || null;
     let result;
     let autoBoot = null;
 
@@ -571,9 +580,9 @@ async function handleRpc(req, body) {
         result = toolAutobot();
         if (sessionKey) bootedSessions.add(sessionKey);
       } else if (['search', 'checkup', 'wegenbelasting'].includes(action)) {
-        if (sessionKey && !bootedSessions.has(sessionKey)) {
+        if (!sessionKey || !bootedSessions.has(sessionKey)) {
           autoBoot = toolAutobot();
-          bootedSessions.add(sessionKey);
+          if (sessionKey) bootedSessions.add(sessionKey);
         }
         if      (action === 'checkup')        result = await toolCheckup(args);
         else if (action === 'search')         result = await toolSearch(args);
@@ -646,7 +655,7 @@ function sseHandler(messagesPath) {
 function rpcHandler() {
   return async (req, res) => {
     if (!req.body?.jsonrpc) return res.status(400).json({ error: 'Invalid JSON-RPC' });
-    return res.json(await handleRpc(req, req.body));
+    return res.json(await handleRpc(req, res, req.body));
   };
 }
 
